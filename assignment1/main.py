@@ -1,7 +1,6 @@
 import json
 import time
 from typing import Tuple
-from torch.nn import functional
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -21,17 +20,31 @@ def prepare_dataset(train_data, train_pred, batch_size):
     return trainloader
 
 
-def prepare_datasets(inputs:list, outputs:list, validation_percentage: float=0.15, testing_percentage: float=0.15) -> Tuple[list, list, list]:
-    # input_data, output_data = divide_batches(input_data, output_data)
-    train_data_tensors = [torch.tensor(vector) for vector in inputs]
-    train_target_tensors = [torch.tensor(vector) for vector in outputs]
-    return train_data_tensors, train_target_tensors, []
+def prepare_datasets(inputs:list, labels:list, batch, validation_percentage: float=0.15,
+                     testing_percentage: float=0.15) -> Tuple[DataLoader, DataLoader, DataLoader]:
+
+    train_data = inputs[int((validation_percentage + testing_percentage) * len(inputs)):]
+    train_labels = labels[int((validation_percentage + testing_percentage) * len(labels)):]
+    print("divided train data")
+
+    validation_data = inputs[:int(validation_percentage * len(inputs))]
+    validation_labels = labels[: int(validation_percentage * len(labels))]
+    print("divided validation data")
+
+    testing_data = inputs[int(validation_percentage * len(inputs)): int(validation_percentage * len(inputs)) + int(
+        testing_percentage * len(inputs))]
+    testing_labels = labels[int(validation_percentage * len(labels)): int(validation_percentage * len(labels)) + int(
+        testing_percentage * len(labels))]
+
+    train_dataset = prepare_dataset(train_data, train_labels, batch)
+    validation_dataset = prepare_dataset(validation_data, validation_labels, batch)
+    test_dataset = prepare_dataset(testing_data, testing_labels, batch)
+    return train_dataset, validation_dataset, test_dataset
 
 
 def network_validation(network, criterion, validation_dataset, device):
     epoch_validation_loss = []
-    for batch_idx, (inputs, labels) in tqdm(enumerate(validation_dataset)):
-        # inputs = inputs.view(-1,1,5)
+    for inputs, labels in tqdm(validation_dataset):
         outs = network(inputs.to(device))
         loss = criterion(outs, labels.to(device))
         loss.backward()
@@ -44,7 +57,7 @@ def network_training(network, train_dataset, epochs, device, validation_dataset=
     train_losses = []
     validation_losses = []
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.Adam(network.parameters(), lr=learning_rate, weight_decay=0.001)
+    optimizer = torch.optim.Adam(network.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     for epoch in range(epochs):  # loop over the dataset multiple times
         running_loss = 0.0
@@ -81,7 +94,7 @@ def network_testing(network, test_dataset, batches, device):
     with torch.no_grad():
         for data, labels in test_dataset:
             counter += 1
-            outs = network(data)
+            outs = network(data.to(device))
             _, predicted = torch.max(outs.data, 1)
             tot += labels.size(0)
             corr += (predicted == labels.to(device)).sum().item()
@@ -119,7 +132,9 @@ def run_network(network, train_dataset, test_dataset, epochs, batches, device, n
     # input()
     accuracy, correct, total = network_testing(network, test_dataset, batches, device)
     print("post testing, pre saving results")
-    save_results(name, training_losses, validation_losses, accuracy, correct, total, delta_train_time)
+    save_results(name=name, training_losses=training_losses, validation_losses=validation_losses, test_accuracy=accuracy,
+                 test_correct=correct, test_total=total, delta_time=delta_train_time, batches=batches, epochs=epochs,
+                 learning_rate=learning_rate, weight_decay=weight_decay)
     print("post saving results")
 
 
@@ -130,7 +145,7 @@ if __name__ == '__main__':
     btch = 3
     lrate = 0.001
     wdecay = 0.001
-    dev = "gpu"
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     input_size = 0
     hidden_size = 0
