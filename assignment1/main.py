@@ -2,111 +2,143 @@ import json
 import time
 from typing import Tuple
 from torch.nn import functional
-from models import MLP
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from models import MLP, Dataset
 from models import LSTM
 import torch
 RESULT_FILE = "results.json"
-EPOCHS = 1
-LEARNING_RATE = 0.001
-WEIGHT_DECAY = 0.001
 NN_TYPE = {
     "mlp": MLP,
     "lstm": LSTM
 }
 
 
-def prepare_tensors(input_data:list, output_data:list) -> Tuple[list, list]:
+def prepare_dataset(train_data, train_pred, batch_size):
+    trainset = Dataset(train_data, train_pred)
+    trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    return trainloader
+
+
+def prepare_datasets(inputs:list, outputs:list, validation_percentage: float=0.15, testing_percentage: float=0.15) -> Tuple[list, list, list]:
     # input_data, output_data = divide_batches(input_data, output_data)
-    train_data_tensors = [torch.tensor(vector) for vector in input_data]
-    train_target_tensors = [torch.tensor(vector) for vector in output_data]
+    train_data_tensors = [torch.tensor(vector) for vector in inputs]
+    train_target_tensors = [torch.tensor(vector) for vector in outputs]
+    return train_data_tensors, train_target_tensors, []
 
-    # Changing structure of target from (batch_size) to (batch_size, 1)
-    # for e in range(len(train_target_tensors)):
-    #     train_target_tensors[e] = train_target_tensors[e].view(-1, 1)
-    return train_data_tensors, train_target_tensors
 
-def train_network(input_batches, target_batches, net):
-    """
-    :param target_batches:
-    :param input_batches:
-    :param net:
+def network_validation(network, criterion, validation_dataset, device):
+    epoch_validation_loss = []
+    for batch_idx, (inputs, labels) in tqdm(enumerate(validation_dataset)):
+        # inputs = inputs.view(-1,1,5)
+        outs = network(inputs.to(device))
+        loss = criterion(outs, labels.to(device))
+        loss.backward()
+        epoch_validation_loss.append(loss.item())
+    return epoch_validation_loss
 
-    """
+
+def network_training(network, train_dataset, epochs, device, validation_dataset=None, learning_rate=0.001, weight_decay=0.001):
     total_iterations = 0
-    total_losses = []
-    # criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(net.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    for epoch in range(EPOCHS):  # loop over the dataset multiple times
-        for batch_idx, (inputs, labels) in enumerate(zip(input_batches, target_batches)):
+    train_losses = []
+    validation_losses = []
+    criterion = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(network.parameters(), lr=learning_rate, weight_decay=0.001)
+
+    for epoch in range(epochs):  # loop over the dataset multiple times
+        running_loss = 0.0
+        epoch_train_loss = []
+
+        for batch_idx, (inputs, labels) in tqdm(enumerate(train_dataset)):
             optimizer.zero_grad()
-            outputs = net(inputs)
-            print("output shape :" + str(outputs.shape))
-            print("labels shape:  " + str(labels.shape))
-            # loss = criterion(outputs, labels)
-            loss = functional.cross_entropy(outputs, labels)
+            outs = network(inputs.to(device))
+            loss = criterion(outs, labels.to(device))
             loss.backward()
             optimizer.step()
-            # input()
-
 
             total_iterations += 1
-            total_losses.append(loss.item())
-            if len(input_batches) % ((batch_idx + 1) * 10) == 0:
-                print("Epoch n°: " + str(epoch) + ", batches computed: " + str(batch_idx) + ", current loss: " + str(loss.item()))
-    return net, total_losses
+            epoch_train_loss.append(loss.item())
+            running_loss += loss.item()
+            if batch_idx % 1000 == 999:
+                print(
+                    "[%d, %5d] loss: %.3f"
+                    % (epoch + 1, batch_idx + 1, running_loss / 1000)
+                )
+                running_loss = 0.0
+
+        train_losses.append(epoch_train_loss)
+        if validation_dataset is not None:
+            validation_loss = network_validation(network, criterion, validation_dataset, device)
+            validation_losses.append(validation_loss)
+    return network, train_losses, validation_losses
 
 
-def test_network(test_data, test_target, net) -> Tuple[float, float, float]:
-    """
-    :param net:
-    """
+def network_testing(network, test_dataset, batches, device):
     corr = 0
     tot = 0
     counter = 0
     with torch.no_grad():
-        for inp_data, target in zip(test_data, test_target):
+        for data, labels in test_dataset:
             counter += 1
-            outputs = net(inp_data)
-            _, predicted = torch.max(outputs.data, 1)
-            tot += target.size(0)
-            corr += (predicted == target).sum().item()
+            outs = network(data)
+            _, predicted = torch.max(outs.data, 1)
+            tot += labels.size(0)
+            corr += (predicted == labels.to(device)).sum().item()
     acc = 100 * corr / tot
-    print("Accuracy of the network on the %d test images: %d %%" % (counter, acc))
+    print("Accuracy of the network on the %d test data: %d %%" % (counter * batches, acc))
     return acc, corr, tot
 
 
-def save_results(name: str, losses: list, test_accuracy: float, test_correct: float, test_total: float, delta_time: float) -> None:
+def save_results(name: str, training_losses: list, validation_losses:list,
+                 test_accuracy: float, test_correct: float, test_total: float,
+                 delta_time: float, batches: int, epochs: int, learning_rate: float, weight_decay: float) -> None:
     res = {
-        "losses": losses,
+        "training_losses": training_losses,
+        "validation_losses": validation_losses,
         "accuracy": test_accuracy,
         "correct": test_correct,
         "total": test_total,
+        "batches": batches,
+        "epochs": epochs,
+        "learning_rate": learning_rate,
+        "weight_decay": weight_decay,
         "delta_training_time": delta_time
     }
     with open(name + RESULT_FILE, "w") as fp:
         json.dump(res, fp)
 
 
-def run_network(input_data, target_data,
-                # validation_input, validation_target,
-                test_input, test_target, net, name):
+def run_network(network, train_dataset, test_dataset, epochs, batches, device, name, validation_dataset=None, learning_rate=0.001, weight_decay: float=0.001):
     print("pre training")
     initial_train_time = time.time()
-    net, losses = train_network(input_data, target_data,
-                                # validation_input, validation_target,
-                                net)
+    network, training_losses, validation_losses = network_training(network, train_dataset, epochs, device, validation_dataset, learning_rate, weight_decay)
     delta_train_time = time.time() - initial_train_time
     print("Training time: " + str(delta_train_time))
     print("post training, pre testing")
     # input()
-    accuracy, correct, total = test_network(test_input, test_target, net)
+    accuracy, correct, total = network_testing(network, test_dataset, batches, device)
     print("post testing, pre saving results")
-    save_results(name, losses, accuracy, correct, total, delta_train_time)
+    save_results(name, training_losses, validation_losses, accuracy, correct, total, delta_train_time)
     print("post saving results")
 
 
 if __name__ == '__main__':
     nn_type = "MLP"
+    val_percentage = test_percentage = 0.15
+    epch = 10
+    btch = 3
+    lrate = 0.001
+    wdecay = 0.001
+    dev = "gpu"
 
-    data = []
-    network = NN_TYPE[nn_type]
+    input_size = 0
+    hidden_size = 0
+    output_size = 0
+
+    input_data, output_data = zip([], [])
+    train, validation, test = prepare_datasets(input_data, output_data, val_percentage, test_percentage)
+    net = NN_TYPE[nn_type]
+    net = net(input_size, hidden_size, output_size)
+    run_network(network=net, train_dataset=train, validation_dataset=validation, test_dataset=test,
+                epochs=epch, batches=btch, device=dev, name=nn_type, learning_rate=lrate, weight_decay=wdecay)

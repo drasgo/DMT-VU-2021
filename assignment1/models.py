@@ -2,6 +2,25 @@ import torch
 from torch import nn
 
 
+class Dataset(torch.utils.data.Dataset):
+    """Characterizes a dataset for PyTorch"""
+    def __init__(self, inps, labels):
+        """Initialization"""
+        self.labels = labels
+        self.inps = inps
+
+    def __len__(self):
+        """Denotes the total number of samples"""
+        return len(self.inps)
+
+    def __getitem__(self, index):
+        """Generates one sample of data"""
+        # Select sample
+        x = self.inps[index]
+        y = int(self.labels[index])
+        return x, y
+
+
 class MLP(torch.nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(MLP, self).__init__()
@@ -13,7 +32,8 @@ class MLP(torch.nn.Module):
         data = self.lin1(data)
         data = torch.tanh(data)
         data = self.lin2(data)
-        return self.softmax(data)
+        return self.sigmoid(data)
+
 
 class LSTM(torch.nn.Module):
     def __init__(self, input_size, hidden_size, output_size, lstm_layers=1):
