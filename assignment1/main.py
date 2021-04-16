@@ -8,7 +8,8 @@ import pickle
 import numpy
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import pandas
+
+from assignment1.plots import plot_results
 from models import MLP, Dataset
 from models import LSTM
 import torch
@@ -23,6 +24,7 @@ NN_TYPE = {
 
 
 def prepare_dataset(train_data, train_pred, batch_size):
+    """Given the input and the label data, create a dataloader to automatically retrieve them later on."""
     train_data = numpy.array(train_data)
     train_pred = numpy.array(train_pred)
     trainset = Dataset(train_data, train_pred)
@@ -32,7 +34,7 @@ def prepare_dataset(train_data, train_pred, batch_size):
 
 def prepare_datasets(inputs:list, labels:list, batch: int, validation_percentage: float=0.15,
                      testing_percentage: float=0.15) -> Tuple[DataLoader, DataLoader, DataLoader]:
-
+    """Divide the data for training, validation and testing, and creating the dataloader for them"""
     train_data = inputs[int((validation_percentage + testing_percentage) * len(inputs)):]
     train_labels = labels[int((validation_percentage + testing_percentage) * len(labels)):]
     print("divided train data")
@@ -53,9 +55,13 @@ def prepare_datasets(inputs:list, labels:list, batch: int, validation_percentage
 
 
 def network_validation(network, criterion, validation_dataset, device):
+    """Validation phase, executed after each epoch of the training phase to see the improvements of the network."""
     epoch_validation_loss = []
     for inputs, labels in tqdm(validation_dataset):
-        inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.long).to(device)
+        if nn_type == "lstm":
+            inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.long).to(device)
+        else:
+            inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.float32).to(device)
         labels = labels.reshape([labels.shape[0], 1]).to(torch.float32).to(device)
         outs = network(inputs)
         loss = criterion(outs, labels)
@@ -65,6 +71,10 @@ def network_validation(network, criterion, validation_dataset, device):
 
 
 def network_training(network, train_dataset: DataLoader, epochs, device, validation_dataset=None, learning_rate=0.001, weight_decay=0.001):
+    """
+    Training the network with Adam optimizer for MLP and RMSprop for LSTM. Both have MSE loss technique.
+    After every batch we validate with the validation dataset.
+    """
     total_iterations = 0
     train_losses = []
     validation_losses = []
@@ -79,7 +89,11 @@ def network_training(network, train_dataset: DataLoader, epochs, device, validat
         epoch_train_loss = []
 
         for batch_idx, (inputs, labels) in tqdm(enumerate(train_dataset)):
-            inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.long).to(device)
+            if nn_type == "lstm":
+                inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.long).to(device)
+            else:
+                inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.float32).to(device)
+
             labels = labels.reshape([labels.shape[0], 1]).to(torch.float32).to(device)
             optimizer.zero_grad()
             outs = network(inputs)
@@ -101,14 +115,18 @@ def network_training(network, train_dataset: DataLoader, epochs, device, validat
     return network, train_losses, validation_losses
 
 
-def network_testing(network, test_dataset, batches, device):
+def network_testing(network, test_dataset, device):
+    """Test the network with the testing dataset, and computing the average error and the error distances."""
     tot = 0
     error = []
     counter = 0
     error_distances = {}
     with torch.no_grad():
         for inputs, labels in tqdm(test_dataset):
-            inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.long).to(device)
+            if nn_type == "lstm":
+                inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.long).to(device)
+            else:
+                inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.float32).to(device)
             labels = labels.reshape([labels.shape[0], 1]).to(torch.float32).to(device)
             counter += 1
             outs = network(inputs)
@@ -130,6 +148,10 @@ def network_testing(network, test_dataset, batches, device):
 def save_results(name: str, training_losses: list, validation_losses:list,
                  test_error: float, test_total: float, error_distances: dict,
                  delta_time: float, batches: int, epochs: int, learning_rate: float, weight_decay: float) -> None:
+    """
+    Save the results obtained from training, validation and testing (includind the losses, the error distances,
+    the other information of the model) in a json file
+    """
     res = {
         "training_losses": training_losses,
         "validation_losses": validation_losses,
@@ -156,7 +178,7 @@ def run_network(network, train_dataset, test_dataset, epochs, batches, device, n
     print("Training time: " + str(delta_train_time))
     print("post training, pre testing")
 
-    error, total, error_distances = network_testing(network, test_dataset, batches, device)
+    error, total, error_distances = network_testing(network, test_dataset, device)
     print("post testing, pre saving results")
 
     save_results(name=name, training_losses=training_losses, validation_losses=validation_losses,
@@ -165,11 +187,6 @@ def run_network(network, train_dataset, test_dataset, epochs, batches, device, n
 
     plot_results(training_losses, validation_losses, error, error_distances)
     print("post saving results")
-
-
-def plot_results(training_losses, validation_losses, error, error_distances):
-    # TODO
-    pass
 
 
 if __name__ == '__main__':
@@ -192,8 +209,11 @@ if __name__ == '__main__':
     with open("output.pkl", "rb") as fp:
         output_data = pickle.load(fp)
 
+    # Prepare the dataset
     average_2 = []
     average_4 = []
+    # attributes at index 3 and 5 (we are removing the timestamp at position 1) are averaged out throughout the
+    # whole dataset cause, when they are missing (nan), we can substitute them with their mean value
     for single_input in input_data:
         single_input = single_input.tolist()
         for single_day in single_input:
@@ -206,6 +226,8 @@ if __name__ == '__main__':
     average_2 = sum(average_2) / len(average_2)
     average_4 = sum(average_4) / len(average_4)
 
+    # Creating the actual dataset, removing the Timestamp object (pos 0) and updating the attributes (pos 3 and pos 5)
+    # with their average throughout the dataset, found above
     for single_input in input_data:
         single_input = single_input.tolist()
 
@@ -224,6 +246,7 @@ if __name__ == '__main__':
 
         final_input.append(single_input)
 
+    # Divide the dataset in training, validation and testing dataloaders
     train, validation, test = prepare_datasets(inputs=final_input, labels=output_data,
                                                validation_percentage=val_percentage,
                                                testing_percentage=test_percentage, batch=btch)
