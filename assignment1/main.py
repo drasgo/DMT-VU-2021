@@ -65,7 +65,6 @@ def network_validation(network, criterion, validation_dataset, device):
         labels = labels.reshape([labels.shape[0], 1]).to(torch.float32).to(device)
         outs = network(inputs)
         loss = criterion(outs, labels)
-        loss.backward()
         epoch_validation_loss.append(loss.item())
     return epoch_validation_loss
 
@@ -185,16 +184,18 @@ def run_network(network, train_dataset, test_dataset, epochs, batches, device, n
                  test_error=error, test_total=total, delta_time=delta_train_time, batches=batches, epochs=epochs,
                  learning_rate=learning_rate, weight_decay=weight_decay, error_distances=error_distances)
 
-    plot_results(training_losses, validation_losses, error, error_distances)
+    plot_results(training_losses, validation_losses, error, error_distances, long_name)
     print("post saving results")
 
 
 if __name__ == '__main__':
     nn_type = "lstm"
+    long_name = "Long-Short Term Memory"
+
     val_percentage = test_percentage = 0.15
     epch = 10
     btch = 3
-    lrate = 0.001
+    lrate = 0.005
     wdecay = 0.001
 
     input_size = 15
