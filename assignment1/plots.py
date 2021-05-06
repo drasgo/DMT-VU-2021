@@ -34,7 +34,6 @@ def plot_results(training_losses, validation_losses, error, error_distances, nam
     plt.title("Testing error distances (i.e. |predicted - label|)")
     plt.annotate(f"Average error distance: {str(round(error, 2))}", (4.5, 80),
                  horizontalalignment='right', verticalalignment='top')
-    # plt.text(2, 6,f"Average error distance: {str(round(error, 2))}")
     plt.ylabel("Number of Occurrences")
     plt.xlabel("Distance")
     plt.show()

@@ -26,7 +26,6 @@ class MLP(torch.nn.Module):
         super(MLP, self).__init__()
         self.lin1 = torch.nn.Linear(input_size, hidden_size)
         self.lin2 = torch.nn.Linear(hidden_size, output_size)
-        self.softmax = torch.nn.Softmax(1)
 
     def forward(self, data):
         data = self.lin1(data)
@@ -56,6 +55,4 @@ class LSTM(torch.nn.Module):
         data = self.dropout(data)
         data = data.contiguous().view(-1, self.hidden_size)
         data = self.relu(data)
-        data = self.dropout(data)
-
         return self.lin1(data)
