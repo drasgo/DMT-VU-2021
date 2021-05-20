@@ -7,14 +7,17 @@ import pandas
 import torch
 import numpy
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from model import MLP
 from model import Dataset
 
+# TRAIN_SET = "/content/drive/MyDrive/train_set.csv"
 TRAIN_SET = "datasets/train_set.csv"
-TEST_SET = "datasets/test_set.csv"
+TEST_SET = "/content/drive/MyDrive/test_set.csv"
 MODEL = "network.ptk"
+# device = "cpu"
 device = "cuda" if torch.cuda.is_available() is True else "cpu"
 
 
@@ -48,6 +51,9 @@ def prepare_input(dataset, training: bool=True):
                 (dataset["comp6_rate"] == -1) & (dataset["comp6_inv"] == 0)) | \
                 ((dataset["comp7_rate"] == -1) & (dataset["comp7_inv"] == 0)) | (
                 (dataset["comp8_rate"] == -1) & (dataset["comp8_inv"] == 0)), "competitor"] = 1
+
+    # pca = PCA(n_components=5)
+    # dataset = pca.fit(dataset)
 
     dataset = dataset.drop(["srch_id",
                                 "date_time",
@@ -91,8 +97,12 @@ def prepare_input(dataset, training: bool=True):
                                 "comp8_rate_percent_diff",
                                 ], axis=1)
 
+    print(list(dataset.columns))
+
     dataset = dataset.fillna(0)
-    return dataset.to_numpy()
+    dataset = StandardScaler().fit_transform(dataset)
+
+    return dataset
 
 
 def prepare_label(clicked, booked):
@@ -100,7 +110,7 @@ def prepare_label(clicked, booked):
     for cl, book in zip(clicked, booked):
         if book == 1:
             labels.append(2)
-        if cl == 1:
+        elif cl == 1:
             labels.append(1)
         else:
             labels.append(0)
@@ -113,11 +123,17 @@ def create_loader(train_data, train_pred):
     return trainloader
 
 
-def prepare_dataset(dataset):
+def prepare_dataset(dataset, training: bool=True) -> pandas.DataFrame:
     pandas.set_option('display.max_columns', None)
 
+    if not training:
+        return prepare_input(dataset)
+
+    dataset = dataset.drop(dataset[(dataset["click_bool"] == 0) & (dataset["booking_bool"] == 0)].sample(frac=.7).index)
     output_data = prepare_label(dataset["click_bool"].to_numpy(), dataset["booking_bool"].to_numpy())
     input_data = prepare_input(dataset)
+
+    print(input_data[:3])
 
     train_data = input_data[int((validation_percentage + testing_percentage) * len(input_data)):]
     train_labels = output_data[int((validation_percentage + testing_percentage) * len(output_data)):]
@@ -160,13 +176,13 @@ def network_training_testing():
         json.dump({
         "trainin_loss": training_losses,
         "validation_loss": validation_losses,
-        "testing_losses": metric,
-        "metrics": metrics,
+        "metrics": metric,
         "learning_rate": learning_rate,
         "weight_decay": weight_decay
     }, fp)
 
     return nn
+
 
 def metrics(pred_flat, labels_flat) -> dict:
     """Function to various metrics of our predictions vs labels"""
@@ -178,41 +194,50 @@ def metrics(pred_flat, labels_flat) -> dict:
     pprint.pprint(confusion_matrix(pred_flat, labels_flat))
 
     info = {
-        "classification_report": classification_report(labels_flat, pred_flat),
-        "confusion_matrix": confusion_matrix(pred_flat, labels_flat)
+        "classification_report": json.dumps(classification_report(labels_flat, pred_flat)),
+        # "confusion_matrix": json.dumps(confusion_matrix(pred_flat, labels_flat))
     }
     return info
 
 
-def flat_accuracy(preds, labs):
-    """Function to calculate the accuracy of our predictions vs labels"""
-    pred_flat = numpy.argmax(preds, axis=1).flatten()
-    labels_flat = labs.flatten()
-    return numpy.sum(pred_flat == labels_flat) / len(labels_flat)
-
-
-def network_validation(network, criterion, validation_dataset) -> Tuple[list, list]:
+def network_validation(network, criterion, validation_dataset) -> Tuple[float, float]:
     """Validation phase, executed after each epoch of the training phase to see the improvements of the network."""
     epoch_validation_loss = []
     epoch_validation_accuracy = []
+    corr = 0
+    tot = 0
     for batch_idx, (inputs, labels) in tqdm(enumerate(validation_dataset)):
         inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.float32).to(device)
 
         with torch.no_grad():
             outs = network(inputs.to(device))
         loss = criterion(outs, labels.to(device))
+        _, predicted = torch.max(outs.data, 1)
+
+        tot += labels.size(0)
+        try:
+            corr += (predicted == labels.cpu()).sum().item()
+        except Exception as exc:
+            print(outs)
+            print(predicted)
+            print(labels)
+            print(exc)
+            input()
+        epoch_validation_accuracy.append(corr/tot)
         epoch_validation_loss.append(loss.item())
-        epoch_validation_accuracy.append(flat_accuracy(outs, labels.to(device)))
-    return epoch_validation_loss, epoch_validation_accuracy
+
+    return sum(epoch_validation_loss) / len(epoch_validation_loss), sum(epoch_validation_accuracy) / len(epoch_validation_accuracy)
 
 
 def train_network(
-    network: MLP, trainloader: DataLoader, validation_loader: DataLoader) -> Tuple[MLP, list, List[Tuple[list, list]]]:
+    network: MLP, trainloader: DataLoader, validation_loader: DataLoader) -> Tuple[MLP, list, List[Tuple[float, float]]]:
     total_iterations = 0
     total_losses = []
     validation_losses = []
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(network.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.SGD(network.parameters(), lr=learning_rate, momentum=0.9)
+
+     # optimizer = torch.optim.Adam(network.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     for epoch in range(epochs):  # loop over the dataset multiple times
         print("")
@@ -275,9 +300,29 @@ def test_network(testloader: DataLoader, network: MLP) -> dict:
 
 
 def deploy_phase(nn):
-    dataset = pandas.read_csv(TEST_SET, header=True)
-    dataset = prepare_dataset(dataset)
-#     TODO
+    dataset = pandas.read_csv(TEST_SET)
+    dataset = prepare_dataset(dataset, False)
+    result = pandas.DataFrame(columns=["srch_id", "prop_id"])
+    temp_results = {}
+    prev_index = -1
+
+    for _, row in dataset.iterrows():
+        with torch.no_grad():
+            # Forward pass, calculate logit predictions
+            output = nn(model)
+
+        if row["srch_id"] != prev_index and prev_index != -1:
+            for r in sorted(temp_results, key=temp_results.get, reverse=True):
+                # add results in new dataframe
+                result["srch_id"] = prev_index
+                result["prop_id"] = r
+
+            prev_index = row["srch_id"]
+            temp_results = {}
+
+        temp_results["prop_id"] = output
+    result.to_csv('out.csv')
+
 
 if __name__ == "__main__":
     train_flag = True
@@ -287,9 +332,9 @@ if __name__ == "__main__":
     input_size = 12
     hidden_size = 50
     output_size = 3
-    learning_rate = 5e-5
-    weight_decay = 0.001
-    epochs = 10
+    learning_rate = 0.001
+    weight_decay = 0.0001
+    epochs = 1
 
     if train_flag:
         model = network_training_testing()
