@@ -1,7 +1,8 @@
 import json
 import os
 import pprint
-from typing import Tuple, List
+from typing import Tuple
+import matplotlib.pyplot as plt
 
 import pandas
 import torch
@@ -15,10 +16,11 @@ from model import Dataset
 
 # TRAIN_SET = "/content/drive/MyDrive/train_set.csv"
 TRAIN_SET = "datasets/train_set.csv"
-TEST_SET = "/content/drive/MyDrive/test_set.csv"
+# TEST_SET = "/content/drive/MyDrive/test_set.csv"
+TEST_SET = "datasets/test_set.csv"
 MODEL = "network.ptk"
-# device = "cpu"
-device = "cuda" if torch.cuda.is_available() is True else "cpu"
+device = "cpu"
+# device = "cuda" if torch.cuda.is_available() is True else "cpu"
 
 
 
@@ -26,6 +28,7 @@ def retrieve_network():
     mod = MLP(input_size, hidden_size, output_size).to(device)
 
     if os.path.exists(MODEL):
+        print("Model retrieved")
         mod.load_state_dict(torch.load(MODEL))
         mod.eval()
 
@@ -127,7 +130,7 @@ def prepare_dataset(dataset, training: bool=True) -> pandas.DataFrame:
     pandas.set_option('display.max_columns', None)
 
     if not training:
-        return prepare_input(dataset)
+        return prepare_input(dataset, training)
 
     dataset = dataset.drop(dataset[(dataset["click_bool"] == 0) & (dataset["booking_bool"] == 0)].sample(frac=.7).index)
     output_data = prepare_label(dataset["click_bool"].to_numpy(), dataset["booking_bool"].to_numpy())
@@ -193,6 +196,23 @@ def metrics(pred_flat, labels_flat) -> dict:
     print("\n***Confusion matrix")
     pprint.pprint(confusion_matrix(pred_flat, labels_flat))
 
+    plot_class_report = pandas.DataFrame(classification_report(pred_flat, labels_flat))
+    fig = plot_class_report.plot(kind='bar', x="dataframe_1", y="dataframe_2")  # bar can be replaced by
+    fig.savefig("classif_report.png", dpi=200, format='png', bbox_inches='tight')
+    plt.close()
+
+    labels = ["class 1", "class 2", "class 3"]
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    cax = ax.matshow(confusion_matrix(pred_flat, labels_flat))
+    plt.title('Confusion matrix of the classifier')
+    fig.colorbar(cax)
+    ax.set_xticklabels([''] + labels)
+    ax.set_yticklabels([''] + labels)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.savefig("conf_matrix.png", dpi=200, format='png', bbox_inches='tight')
+
     info = {
         "classification_report": json.dumps(classification_report(labels_flat, pred_flat)),
         # "confusion_matrix": json.dumps(confusion_matrix(pred_flat, labels_flat))
@@ -200,7 +220,7 @@ def metrics(pred_flat, labels_flat) -> dict:
     return info
 
 
-def network_validation(network, criterion, validation_dataset) -> Tuple[float, float]:
+def network_validation(network, criterion, validation_dataset) -> Tuple[list, list]:
     """Validation phase, executed after each epoch of the training phase to see the improvements of the network."""
     epoch_validation_loss = []
     epoch_validation_accuracy = []
@@ -215,22 +235,16 @@ def network_validation(network, criterion, validation_dataset) -> Tuple[float, f
         _, predicted = torch.max(outs.data, 1)
 
         tot += labels.size(0)
-        try:
-            corr += (predicted == labels.cpu()).sum().item()
-        except Exception as exc:
-            print(outs)
-            print(predicted)
-            print(labels)
-            print(exc)
-            input()
+        corr += (predicted == labels.cpu()).sum().item()
+
         epoch_validation_accuracy.append(corr/tot)
         epoch_validation_loss.append(loss.item())
 
-    return sum(epoch_validation_loss) / len(epoch_validation_loss), sum(epoch_validation_accuracy) / len(epoch_validation_accuracy)
+    return epoch_validation_loss, epoch_validation_accuracy
 
 
 def train_network(
-    network: MLP, trainloader: DataLoader, validation_loader: DataLoader) -> Tuple[MLP, list, List[Tuple[float, float]]]:
+    network: MLP, trainloader: DataLoader, validation_loader: DataLoader) -> Tuple[MLP, list, list]:
     total_iterations = 0
     total_losses = []
     validation_losses = []
@@ -248,7 +262,6 @@ def train_network(
 
         for batch_idx, (inputs, labels) in enumerate(trainloader):
             inputs = inputs.reshape([inputs.shape[0], -1]).to(torch.float32).to(device)
-
             optimizer.zero_grad()
             outputs = network(inputs.to(device))
             loss = criterion(outputs.to(device), labels.to(device))
@@ -292,40 +305,55 @@ def test_network(testloader: DataLoader, network: MLP) -> dict:
             predictions += predicted
             true_labels += labels.to("cpu")
 
-    res = metrics(predictions, true_labels)
     acc = 100 * corr / tot
     print("Accuracy of the network on the %d test images: %d %%" % (counter, acc))
+
+    res = metrics(predictions, true_labels)
+    res["test_accuracy"] = acc
 
     return res
 
 
 def deploy_phase(nn):
     dataset = pandas.read_csv(TEST_SET)
+    srcs = dataset["srch_id"]
+    props = dataset["prop_id"]
     dataset = prepare_dataset(dataset, False)
-    result = pandas.DataFrame(columns=["srch_id", "prop_id"])
     temp_results = {}
     prev_index = -1
+    result = {
+        "srch_id": [],
+        "prop_id": []
+    }
 
-    for _, row in dataset.iterrows():
-        with torch.no_grad():
-            # Forward pass, calculate logit predictions
-            output = nn(model)
+    dataset = torch.from_numpy(dataset)
+    dataset = dataset.reshape([dataset.shape[0], -1]).to(torch.float32).to(device)
+    output = nn(dataset).cpu()
+    _, predicted = torch.max(output.data, 1)
 
-        if row["srch_id"] != prev_index and prev_index != -1:
+    predicted = predicted.tolist()
+    srcs = srcs.to_numpy().tolist()
+    props = props.to_numpy().tolist()
+
+    for index in tqdm(range(len(predicted))):
+        if srcs[index] != prev_index:
             for r in sorted(temp_results, key=temp_results.get, reverse=True):
                 # add results in new dataframe
-                result["srch_id"] = prev_index
-                result["prop_id"] = r
+                result["srch_id"].append(prev_index)
+                result["prop_id"].append(r)
 
-            prev_index = row["srch_id"]
+            prev_index = srcs[index]
             temp_results = {}
 
-        temp_results["prop_id"] = output
-    result.to_csv('out.csv')
+        temp_results[props[index]] = predicted[index]
+
+    fin = pandas.DataFrame.from_dict(data=result)
+    # fin.reset_index(drop=True, inplace=True)
+    fin.to_csv('out.csv', index=False)
 
 
 if __name__ == "__main__":
-    train_flag = True
+    train_flag = False
     batch_size = 10
     testing_percentage = 0.15
     validation_percentage = 0.15
@@ -338,8 +366,8 @@ if __name__ == "__main__":
 
     if train_flag:
         model = network_training_testing()
-        quit()
     else:
         model = retrieve_network()
 
+    print("Deployment..")
     deploy_phase(model)
